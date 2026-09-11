@@ -1,0 +1,1 @@
+# simulatore-di-pronostici
