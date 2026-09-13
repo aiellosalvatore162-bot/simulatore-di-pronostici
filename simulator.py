@@ -1,6 +1,21 @@
 import numpy as np
 from collections import Counter
 
+# ---------------------------------------------------------------------------
+# NUMERO DI SIMULAZIONI MONTE CARLO — FORZATO
+# ---------------------------------------------------------------------------
+# Prima questo era solo il valore di default del parametro `num_simulazioni`:
+# se in futuro qualcuno avesse passato un numero diverso (o cambiato il
+# default qui senza aggiornare NUM_SIMULAZIONI_TOTALI in app.py), il modello
+# avrebbe eseguito silenziosamente meno simulazioni di quelle dichiarate
+# all'utente, e i conteggi mostrati in dashboard (es. "32.150 / 50.000")
+# sarebbero stati sbagliati.
+#
+# Ora è una costante esplicita e la funzione IGNORA sempre qualsiasi valore
+# diverso venga passato: gira sempre e solo su 50.000 simulazioni.
+SIMULAZIONI_MONTECARLO_FORZATE = 50000
+
+
 def calcola_lambda_aggiustato(lam_offensiva, lam_difensiva_avversaria, fattore_campo=1.1, modifier_web=1.0):
     """
     Calcola il vero lambda atteso incrociando l'attacco di A con la difesa di B,
@@ -10,10 +25,36 @@ def calcola_lambda_aggiustato(lam_offensiva, lam_difensiva_avversaria, fattore_c
     return max(0.1, base * modifier_web)
 
 
+def _valida_dato_reale(valore, nome_campo):
+    """
+    Validazione dei dati reali in ingresso.
+
+    Il Monte Carlo deve girare su dati reali (lambda gol calcolati dalle
+    statistiche vere delle squadre, medie angoli/cartellini reali), non su
+    valori nulli, negativi o non numerici che produrrebbero una simulazione
+    fittizia senza che nessuno se ne accorga. Meglio fallire subito con un
+    errore chiaro piuttosto che restituire un risultato silenziosamente
+    inventato.
+    """
+    try:
+        valore_f = float(valore)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Dato non reale/non numerico per '{nome_campo}': {valore!r}. "
+            f"Il modello richiede statistiche reali per generare le 50.000 simulazioni."
+        )
+    if valore_f <= 0:
+        raise ValueError(
+            f"Dato non valido per '{nome_campo}': {valore_f}. "
+            f"Deve essere un valore reale positivo (lambda gol, media angoli o cartellini)."
+        )
+    return valore_f
+
+
 def simula_partita_completa(
     lam_casa,
     lam_trasferta,
-    # Nuovi parametri opzionali per la forza difensiva avversaria
+    # Parametri opzionali per la forza difensiva avversaria
     def_avversaria_casa=1.0,   # Difesa della squadra in trasferta
     def_avversaria_ospite=1.0, # Difesa della squadra in casa
     fattore_campo=1.15,
@@ -25,8 +66,23 @@ def simula_partita_completa(
     media_angoli_trasferta=4.5,
     media_cartellini_casa=2.2,
     media_cartellini_trasferta=2.5,
-    num_simulazioni=50000
+    num_simulazioni=SIMULAZIONI_MONTECARLO_FORZATE,
 ):
+    # --- FORZATURA 50.000 SIMULAZIONI ---
+    # Qualsiasi valore venga passato per `num_simulazioni` viene ignorato:
+    # il modello Monte Carlo gira sempre su un campione di 50.000 esiti,
+    # cosi il numero dichiarato in dashboard (NUM_SIMULAZIONI_TOTALI) e
+    # quello realmente eseguito coincidono sempre.
+    num_simulazioni = SIMULAZIONI_MONTECARLO_FORZATE
+
+    # --- VALIDAZIONE DATI REALI IN INGRESSO ---
+    lam_casa = _valida_dato_reale(lam_casa, "lam_casa")
+    lam_trasferta = _valida_dato_reale(lam_trasferta, "lam_trasferta")
+    media_angoli_casa = _valida_dato_reale(media_angoli_casa, "media_angoli_casa")
+    media_angoli_trasferta = _valida_dato_reale(media_angoli_trasferta, "media_angoli_trasferta")
+    media_cartellini_casa = _valida_dato_reale(media_cartellini_casa, "media_cartellini_casa")
+    media_cartellini_trasferta = _valida_dato_reale(media_cartellini_trasferta, "media_cartellini_trasferta")
+
     # --- 0. ANCORAGGIO AI DATI REALI (Aggiustamento Poisson) ---
     # Invece di usare lam 'nudo', lo calcoliamo come Attacco_A * Difesa_B * Contesto_Web
     lam_casa_reale = calcola_lambda_aggiustato(
@@ -35,7 +91,7 @@ def simula_partita_completa(
         fattore_campo=fattore_campo,
         modifier_web=modifier_web_casa
     )
-    
+
     lam_trasferta_reale = calcola_lambda_aggiustato(
         lam_offensiva=lam_trasferta,
         lam_difensiva_avversaria=def_avversaria_ospite,
@@ -71,8 +127,12 @@ def simula_partita_completa(
     risultato_top, freq_top = conteggio_risultati.most_common(1)[0]
     risultato_piu_frequente = {
         "Risultato": risultato_top,
-        "Probabilità": round((freq_top / num_simulazioni) * 100, 2),
-        "Conteggio": freq_top,
+        # FIX: la chiave era "Probabilità" (con la P maiuscola e diversa da
+        # tutte le altre sezioni), mentre app.py legge sempre "prob". Con la
+        # chiave sbagliata, il "Risultato Esatto più frequente" veniva
+        # mostrato sempre a 0% in dashboard. Ora è coerente col resto.
+        "prob": round((freq_top / num_simulazioni) * 100, 2),
+        "conteggio": freq_top,
         "Lambda_effettivo_casa": round(lam_casa_reale, 2),
         "Lambda_effettivo_ospite": round(lam_trasferta_reale, 2)
     }
@@ -86,12 +146,14 @@ def simula_partita_completa(
     }
 
     # --- 3. UNDER / OVER FINALE (da 0.5 a 4.5) ---
+    # FIX: prima questi valori erano numeri grezzi mentre altre sezioni
+    # (1X2, Gol/No Gol) usavano {"prob": x}. Standardizzato per coerenza.
     under_over = {}
     for soglia in [0.5, 1.5, 2.5, 3.5, 4.5]:
         c_over = int(np.sum(gol_totali > soglia))
         c_under = num_simulazioni - c_over
-        under_over[f"Over {soglia}"] = round((c_over / num_simulazioni) * 100, 2)
-        under_over[f"Under {soglia}"] = round((c_under / num_simulazioni) * 100, 2)
+        under_over[f"Over {soglia}"] = {"prob": round((c_over / num_simulazioni) * 100, 2)}
+        under_over[f"Under {soglia}"] = {"prob": round((c_under / num_simulazioni) * 100, 2)}
 
     # --- 4. PRIMO TEMPO (PT) 1X2, GOL/NOGOL & UNDER/OVER (da 0.5 a 4.5) ---
     gol_casa_pt = np.random.poisson(lam_casa_pt, num_simulazioni)
@@ -103,26 +165,30 @@ def simula_partita_completa(
     v_t_pt = int(np.sum(gol_casa_pt < gol_trasferta_pt))
 
     ris_1x2_pt = {
-        "1 PT": round((v_c_pt / num_simulazioni) * 100, 2),
-        "X PT": round((p_pt / num_simulazioni) * 100, 2),
-        "2 PT": round((v_t_pt / num_simulazioni) * 100, 2)
+        "1 PT": {"prob": round((v_c_pt / num_simulazioni) * 100, 2)},
+        "X PT": {"prob": round((p_pt / num_simulazioni) * 100, 2)},
+        "2 PT": {"prob": round((v_t_pt / num_simulazioni) * 100, 2)}
     }
 
     c_gol_pt = int(np.sum((gol_casa_pt > 0) & (gol_trasferta_pt > 0)))
     c_nogol_pt = num_simulazioni - c_gol_pt
     gol_nogol_pt = {
-        "Gol PT": round((c_gol_pt / num_simulazioni) * 100, 2),
-        "No Gol PT": round((c_nogol_pt / num_simulazioni) * 100, 2)
+        "Gol PT": {"prob": round((c_gol_pt / num_simulazioni) * 100, 2)},
+        "No Gol PT": {"prob": round((c_nogol_pt / num_simulazioni) * 100, 2)}
     }
 
     under_over_pt = {}
     for soglia in [0.5, 1.5, 2.5, 3.5, 4.5]:
         c_over_pt = int(np.sum(gol_totali_pt > soglia))
         c_under_pt = num_simulazioni - c_over_pt
-        under_over_pt[f"Over {soglia} PT"] = round((c_over_pt / num_simulazioni) * 100, 2)
-        under_over_pt[f"Under {soglia} PT"] = round((c_under_pt / num_simulazioni) * 100, 2)
+        under_over_pt[f"Over {soglia} PT"] = {"prob": round((c_over_pt / num_simulazioni) * 100, 2)}
+        under_over_pt[f"Under {soglia} PT"] = {"prob": round((c_under_pt / num_simulazioni) * 100, 2)}
 
     # --- 5. MULTIGOL (Partita, Casa, Ospite) ---
+    # Nota: qui i valori restano numeri grezzi (non {"prob": x}) perché
+    # app.py renderizza questa sezione con un livello di annidamento in
+    # più (categoria -> Partita/Casa/Ospite -> range) e si aspetta un
+    # numero semplice come foglia finale.
     def calcola_multigol(array_gol):
         m = {}
         ranges = [
@@ -146,12 +212,14 @@ def simula_partita_completa(
     angoli_tot = angoli_c + angoli_t
 
     stat_angoli = {
+        # Le medie NON sono percentuali: restano numeri semplici.
         "Media Angoli Casa": round(float(np.mean(angoli_c)), 2),
         "Media Angoli Ospite": round(float(np.mean(angoli_t)), 2),
         "Media Angoli Totali": round(float(np.mean(angoli_tot)), 2),
-        "Over 8.5 Angoli Totali": round((int(np.sum(angoli_tot > 8.5)) / num_simulazioni) * 100, 2),
-        "Over 9.5 Angoli Totali": round((int(np.sum(angoli_tot > 9.5)) / num_simulazioni) * 100, 2),
-        "Over 10.5 Angoli Totali": round((int(np.sum(angoli_tot > 10.5)) / num_simulazioni) * 100, 2),
+        # Le soglie Over sono probabilità: formato {"prob": x} per coerenza.
+        "Over 8.5 Angoli Totali": {"prob": round((int(np.sum(angoli_tot > 8.5)) / num_simulazioni) * 100, 2)},
+        "Over 9.5 Angoli Totali": {"prob": round((int(np.sum(angoli_tot > 9.5)) / num_simulazioni) * 100, 2)},
+        "Over 10.5 Angoli Totali": {"prob": round((int(np.sum(angoli_tot > 10.5)) / num_simulazioni) * 100, 2)},
     }
 
     # --- 7. CARTELLINI ---
@@ -163,9 +231,9 @@ def simula_partita_completa(
         "Media Cartellini Casa": round(float(np.mean(cart_c)), 2),
         "Media Cartellini Ospite": round(float(np.mean(cart_t)), 2),
         "Media Cartellini Totali": round(float(np.mean(cart_tot)), 2),
-        "Over 3.5 Cartellini Totali": round((int(np.sum(cart_tot > 3.5)) / num_simulazioni) * 100, 2),
-        "Over 4.5 Cartellini Totali": round((int(np.sum(cart_tot > 4.5)) / num_simulazioni) * 100, 2),
-        "Over 5.5 Cartellini Totali": round((int(np.sum(cart_tot > 5.5)) / num_simulazioni) * 100, 2),
+        "Over 3.5 Cartellini Totali": {"prob": round((int(np.sum(cart_tot > 3.5)) / num_simulazioni) * 100, 2)},
+        "Over 4.5 Cartellini Totali": {"prob": round((int(np.sum(cart_tot > 4.5)) / num_simulazioni) * 100, 2)},
+        "Over 5.5 Cartellini Totali": {"prob": round((int(np.sum(cart_tot > 5.5)) / num_simulazioni) * 100, 2)},
     }
 
     return {
