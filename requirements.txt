@@ -2,4 +2,3 @@ streamlit
 pandas
 numpy
 beautifulsoup4
-request
