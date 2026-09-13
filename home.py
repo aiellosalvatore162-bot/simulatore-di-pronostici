@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+from collections import Counter
 from datetime import datetime
 from api_client import get_classifica_campionato, get_marcatori, get_partite_competizione, calcola_statistiche_reali, get_live_odds
-from simulator import simula_partita_avanzata
+from simulator import simula_partita_completa
 
-st.set_page_config(page_title="Pro Betting Analytics Hub", layout="wide")
+st.set_page_config(page_title="Pro Betting Analytics Hub", layout="wide", initial_sidebar_state="expanded")
 
 ST_FILE = "storico_simulazioni.json"
 
@@ -30,6 +31,38 @@ def salva_in_storico(match_str, comp_str, risultati):
     storico.insert(0, item)
     with open(ST_FILE, "w") as f:
         json.dump(storico, f, indent=4)
+
+@st.cache_data(ttl=3600)
+cached_simula_partita_completa(lam_c, lam_t, ang_c, ang_t, cart_c, cart_t):
+    return simula_partita_completa(
+        lam_casa=lam_c,
+        lam_trasferta=lam_t,
+        media_angoli_casa=ang_c,
+        media_angoli_trasferta=ang_t,
+        media_cartellini_casa=cart_c,
+        media_cartellini_trasferta=cart_t
+    )
+
+def trova_miglior_pronostico(sim_result):
+    candidati = []
+
+    # 1X2 Finale
+    for segno, data in sim_result.get("1X2 Finale", {}).items():
+        prob = data.get("prob", 0) if isinstance(data, dict) else data
+        candidati.append((f"Segno {segno}", prob))
+
+    # Gol / No Gol
+    for mercato, data in sim_result.get("Gol / No Gol Finale", {}).items():
+        prob = data.get("prob", 0) if isinstance(data, dict) else data
+        candidati.append((mercato, prob))
+
+    # Under / Over
+    for mercato, prob in sim_result.get("Under / Over Finale (0.5 - 4.5)", {}).items():
+        if "Over 2.5" in mercato or "Under 2.5" in mercato:
+            candidati.append((mercato, prob))
+
+    candidati.sort(key=lambda x: x[1], reverse=True)
+    return candidati[0] if candidati else ("N/D", 0.0)
 
 st.title("⚽ Advanced Football Simulation & Analytics Hub")
 
@@ -113,8 +146,41 @@ if all_matches:
     
     if giornate_disponibili:
         giornata_scelta = st.selectbox("Seleziona Giornata di Campionato", giornate_disponibili, format_func=lambda x: f"Giornata {x}")
-        match_giornata = [m for m in all_matches if m.get("matchday") == giornata_scelta]
+        match_giornata = [m for m in all_matches if m.get("matchday"] == giornata_scelta]
         
+        # --- SCHEDINA DEL GIORNO (>= 70%, max 13 partite) ---
+        with st.expander("🎯 Schedina del Giorno Consigliata (Probabilità >= 70% | Max 13 Partite)", expanded=False):
+            candidati_schedina = []
+            for m in match_giornata:
+                h_name = m["homeTeam"]["name"]
+                a_name = m["awayTeam"]["name"]
+                s_c = calcola_statistiche_reali(comp_code, h_name)
+                s_o = calcola_statistiche_reali(comp_code, a_name)
+                res_temp = simula_partita_completa(
+                    s_c["lambda_gol"], s_o["lambda_gol"],
+                    media_angoli_casa=s_c["media_angoli"], media_angoli_trasferta=s_o["media_angoli"],
+                    media_cartellini_casa=s_c["media_cartellini"], media_cartellini_trasferta=s_o["media_cartellini"]
+                )
+                mercato_top, prob_top = trova_miglior_pronostico(res_temp)
+                if prob_top >= 70.0:
+                    candidati_schedina.append({
+                        "Match": f"{h_name} vs {a_name}",
+                        "Pronostico": mercato_top,
+                        "Probabilità (%)": prob_top,
+                        "Risultato Esatto": res_temp["Risultato Esatto più frequente"]["Risultato"]
+                    })
+            candidati_schedina.sort(key=lambda x: x["Probabilità (%)"], reverse=True)
+            schedina_finale = candidati_schedina[:13]
+            if schedina_finale:
+                df_sch = pd.DataFrame(schedina_finale)
+                st.dataframe(df_sch, use_container_width=True, hide_index=True)
+                prob_combi = 1.0
+                for item in schedina_finale:
+                    prob_combi *= (item["Probabilità (%)"] / 100.0)
+                st.info(f"Partite in schedina: {len(schedina_finale)} / 13 | Probabilità combinata stimata: {round(prob_combi * 100, 2)}%")
+            else:
+                st.warning("Nessuna partita in questa giornata supera il 70% di probabilità nei mercati principali.")
+
         st.markdown(f"### Partite della Giornata {giornata_scelta}")
         
         for idx, m in enumerate(match_giornata):
@@ -122,21 +188,34 @@ if all_matches:
             away = m["awayTeam"]["name"]
             status = m["status"]
             
-            col_info, col_trend, col_btn = st.columns([3, 3, 2])
+            stats_casa = calcola_statistiche_reali(comp_code, home)
+            stats_ospite = calcola_statistiche_reali(comp_code, away)
+            
+            # Simulazione rapida per estrarre il miglior pronostico da affiancare
+            res_rapido = simula_partita_completa(
+                stats_casa["lambda_gol"], stats_ospite["lambda_gol"],
+                media_angoli_casa=stats_casa["media_angoli"], media_angoli_trasferta=stats_ospite["media_angoli"],
+                media_cartellini_casa=stats_casa["media_cartellini"], media_cartellini_trasferta=stats_ospite["media_cartellini"]
+            )
+            miglior_mercato, miglior_prob = trova_miglior_pronostico(res_rapido)
+            
+            col_info, col_trend, col_pronostico, col_btn = st.columns([3, 2, 2, 2])
             
             with col_info:
                 st.markdown(f"**{home} vs {away}**")
                 st.caption(f"Stato: {status}")
                 
-            stats_casa = calcola_statistiche_reali(comp_code, home)
-            stats_ospite = calcola_statistiche_reali(comp_code, away)
-            
             with col_trend:
-                st.text(f"🏠 {home[:12]}: {' '.join(stats_casa['ultime_5'])}\n✈️ {away[:12]}: {' '.join(stats_ospite['ultime_5'])}")
+                st.text(f"🏠 {home[:10]}: {' '.join(stats_casa['ultime_5'])}")
+                st.text(f"✈️ {away[:10]}: {' '.join(stats_ospite['ultime_5'])}")
                 
+            with col_pronostico:
+                st.caption("Miglior Pronostico")
+                st.markdown(f"**{miglior_mercato}** (`{miglior_prob}%`)")
+
             with col_btn:
                 sim_key = f"sim_{comp_code}_{giornata_scelta}_{idx}"
-                if st.button(f"🚀 Simula & Analizza", key=sim_key):
+                if st.button("🚀 Simula & Analizza", key=sim_key):
                     st.session_state["match_attivo"] = {
                         "home": home,
                         "away": away,
@@ -151,7 +230,7 @@ if all_matches:
             st.divider()
             st.markdown(f"## 🔬 Dashboard Analitica Avanzata: **{m_att['home']} vs {m_att['away']}**")
             
-            risultati_sim = simula_partita_avanzata(
+            risultati_sim = simula_partita_completa(
                 lam_casa=m_att["stats_casa"]["lambda_gol"],
                 lam_trasferta=m_att["stats_ospite"]["lambda_gol"],
                 media_angoli_casa=m_att["stats_casa"]["media_angoli"],
@@ -160,7 +239,90 @@ if all_matches:
                 media_cartellini_trasferta=m_att["stats_ospite"]["media_cartellini"]
             )
             
+            # --- CARD STILE MODERNO ---
+            lam_c = m_att["stats_casa"]["lambda_gol"]
+            lam_t = m_att["stats_ospite"]["lambda_gol"]
+            if lam_c >= lam_t:
+                colore_casa = "#2ca02c"     # Verde (favorita)
+                colore_trasferta = "#d90429"  # Rosso (sfavorita)
+            else:
+                colore_casa = "#d90429"     # Rosso (sfavorita)
+                colore_trasferta = "#2ca02c"  # Verde (favorita)
+            colore_draw = "#f77f00"         # Arancione (pareggio)
+
+            prob_1 = risultati_sim["1X2 Finale"]["1"]["prob"]
+            prob_X = risultati_sim["1X2 Finale"]["X"]["prob"]
+            prob_2 = risultati_sim["1X2 Finale"]["2"]["prob"]
+
+            miglior_segno = max([("1", prob_1), ("X", prob_X), ("2", prob_2)], key=lambda x: x[1])
+
+            st.markdown("""
+                <style>
+                .match-card {
+                    background-color: #0b132b;
+                    padding: 20px;
+                    border-radius: 12px;
+                    border: 1px solid #1c2541;
+                    color: white;
+                    margin-bottom: 20px;
+                }
+                .confidence-banner {
+                    background-color: #ff4b4b;
+                    text-align: center;
+                    font-weight: bold;
+                    padding: 8px;
+                    border-radius: 6px;
+                    margin: 15px 0;
+                }
+                </style>
+            """, unsafe_allow_html=True)
+
+            with st.container():
+                st.markdown('<div class="match-card">', unsafe_allow_html=True)
+                col_c, col_score, col_t = st.columns([2, 1, 2])
+                with col_c:
+                    st.markdown(f"<h3 style='text-align: right;'>{m_att['home']}</h3>", unsafe_allow_html=True)
+                with col_score:
+                    ris_esatto = risultati_sim["Risultato Esatto più frequente"]["Risultato"]
+                    st.markdown(f"<h2 style='text-align: center;'>{ris_esatto.replace('-', ' : ')}</h2>", unsafe_allow_html=True)
+                with col_t:
+                    st.markdown(f"<h3>{m_att['away']}</h3>", unsafe_allow_html=True)
+
+                st.markdown(f'<div class="confidence-banner">SEGNO {miglior_segno[0]} · {miglior_segno[1]}% CONFIDENCE</div>', unsafe_allow_html=True)
+
+                st.caption("OUTCOME PROBABILITY")
+                c1, c2, c3 = st.columns([max(prob_1, 1), max(prob_X, 1), max(prob_2, 1)])
+                with c1:
+                    st.markdown(f"<div style='background-color:{colore_casa}; height:12px; border-radius:4px;'></div><small>{prob_1}% {m_att['home']}</small>", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"<div style='background-color:{colore_draw}; height:12px; border-radius:4px;'></div><small>{prob_X}% Draw</small>", unsafe_allow_html=True)
+                with c3:
+                    st.markdown(f"<div style='background-color:{colore_trasferta}; height:12px; border-radius:4px;'></div><small>{prob_2}% {m_att['away']}</small>", unsafe_allow_html=True)
+
+                st.divider()
+
+                p1, p2, p3 = st.columns(3)
+                with p1:
+                    st.metric("Over 2.5", f"{risultati_sim['Under / Over Finale (0.5 - 4.5)']['Over 2.5']}%")
+                with p2:
+                    st.metric("Gol / No Gol", "Gol" if risultati_sim["Gol / No Gol Finale"]["Gol"]["prob"] > 50 else "No Gol")
+                with p3:
+                    st.metric("Angoli Totali (Media)", f"~{risultati_sim['Statistiche Angoli']['Media Angoli Totali']}")
+
+                p4, p5, p6 = st.columns(3)
+                with p4:
+                    st.metric("Cartellini (Media)", f"~{risultati_sim['Statistiche Cartellini']['Media Cartellini Totali']}")
+                with p5:
+                    st.metric("Over 9.5 Angoli", f"{risultati_sim['Statistiche Angoli']['Over 9.5 Angoli Totali']}%")
+                with p6:
+                    st.metric("Over 4.5 Cartellini", f"{risultati_sim['Statistiche Cartellini']['Over 4.5 Cartellini Totali']}%")
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            # --- DETTAGLIO COMPLETO DI TUTTE LE SEZIONI ---
             for categoria, dati in risultati_sim.items():
+                if categoria == "Risultato Esatto più frequente":
+                    continue
                 st.markdown(f"#### 📌 {categoria}")
                 if isinstance(dati, dict):
                     cols = st.columns(3)
@@ -168,11 +330,11 @@ if all_matches:
                     for chiave, valore in dati.items():
                         with cols[i % 3]:
                             if isinstance(valore, dict) and 'prob' in valore:
-                                st.metric(label=chiave, value=f"{valore['prob']}%", help=valore['spiegazione'])
+                                st.metric(label=chiave, value=f"{valore['prob']}%")
                             elif isinstance(valore, dict):
                                 st.write(f"**{chiave}**")
                                 for sub_k, sub_v in valore.items():
-                                    st.text(f"• {sub_k}: {sub_v['prob']}%")
+                                    st.text(f"• {sub_k}: {sub_v}%" if isinstance(sub_v, (int, float)) else f"• {sub_k}: {sub_v}")
                             else:
                                 st.metric(label=chiave, value=str(valore))
                         i += 1
@@ -194,17 +356,16 @@ if all_matches:
                                 if market.get("key") == "h2h":
                                     outcomes = market.get("outcomes", [])
                                     cols_vb = st.columns(len(outcomes))
-                                    esito_dati = risultati_sim.get("1X2 & Doppia Chance", {})
                                     for idx_o, outcome in enumerate(outcomes):
                                         nome_esito = outcome.get("name")
                                         quota_reale = outcome.get("price")
                                         prob_modello = 33.3
                                         if "home" in nome_esito.lower() or m_att["home"].lower() in nome_esito.lower():
-                                            prob_modello = float(esito_dati.get("1 (Casa)", {}).get("prob", 33))
+                                            prob_modello = float(risultati_sim["1X2 Finale"]["1"]["prob"])
                                         elif "away" in nome_esito.lower() or m_att["away"].lower() in nome_esito.lower():
-                                            prob_modello = float(esito_dati.get("2 (Ospite)", {}).get("prob", 33))
+                                            prob_modello = float(risultati_sim["1X2 Finale"]["2"]["prob"])
                                         else:
-                                            prob_modello = float(esito_dati.get("X (Pareggio)", {}).get("prob", 33))
+                                            prob_modello = float(risultati_sim["1X2 Finale"]["X"]["prob"])
                                             
                                         quota_equa = round(100 / max(prob_modello, 1.0), 2)
                                         
