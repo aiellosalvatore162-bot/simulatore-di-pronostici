@@ -1,12 +1,6 @@
-from setuptools import setup, find_packages
-
-setup(
-    name="simulator",
-    version="1.0",
-    packages=find_packages(),
-    install_requires=[
-        "streamlit",
-        "pandas",
-        "requests",
-    ],
-)
+install_requires=[
+    "streamlit",
+    "pandas",
+    "requests",
+    "numpy",
+],
