@@ -1,9 +1,24 @@
 import numpy as np
 from collections import Counter
 
+def calcola_lambda_aggiustato(lam_offensiva, lam_difensiva_avversaria, fattore_campo=1.1, modifier_web=1.0):
+    """
+    Calcola il vero lambda atteso incrociando l'attacco di A con la difesa di B,
+    applicando il fattore campo e i moltiplicatori esterni (xG, infortuni, meteo).
+    """
+    base = (lam_offensiva * lam_difensiva_avversaria) * fattore_campo
+    return max(0.1, base * modifier_web)
+
+
 def simula_partita_completa(
     lam_casa,
     lam_trasferta,
+    # Nuovi parametri opzionali per la forza difensiva avversaria
+    def_avversaria_casa=1.0,   # Difesa della squadra in trasferta
+    def_avversaria_ospite=1.0, # Difesa della squadra in casa
+    fattore_campo=1.15,
+    modifier_web_casa=1.0,     # Es. derivato da xG o assenze (es. 0.90 se manca il bomber)
+    modifier_web_ospite=1.0,
     lam_casa_pt=None,
     lam_trasferta_pt=None,
     media_angoli_casa=5.0,
@@ -12,15 +27,31 @@ def simula_partita_completa(
     media_cartellini_trasferta=2.5,
     num_simulazioni=50000
 ):
-    # Se non specificati, stima del primo tempo come ~45% del dato complessivo
-    if lam_casa_pt is None:
-        lam_casa_pt = lam_casa * 0.45
-    if lam_trasferta_pt is None:
-        lam_trasferta_pt = lam_trasferta * 0.45
+    # --- 0. ANCORAGGIO AI DATI REALI (Aggiustamento Poisson) ---
+    # Invece di usare lam 'nudo', lo calcoliamo come Attacco_A * Difesa_B * Contesto_Web
+    lam_casa_reale = calcola_lambda_aggiustato(
+        lam_offensiva=lam_casa,
+        lam_difensiva_avversaria=def_avversaria_casa,
+        fattore_campo=fattore_campo,
+        modifier_web=modifier_web_casa
+    )
+    
+    lam_trasferta_reale = calcola_lambda_aggiustato(
+        lam_offensiva=lam_trasferta,
+        lam_difensiva_avversaria=def_avversaria_ospite,
+        fattore_campo=1.0, # Il fattore campo non si applica agli ospiti
+        modifier_web=modifier_web_ospite
+    )
 
-    # --- 1. SIMULAZIONE GOL FINALE (Poisson) ---
-    gol_casa = np.random.poisson(lam_casa, num_simulazioni)
-    gol_trasferta = np.random.poisson(lam_trasferta, num_simulazioni)
+    # Se non specificati, stima del primo tempo come ~45% del dato reale complessivo
+    if lam_casa_pt is None:
+        lam_casa_pt = lam_casa_reale * 0.45
+    if lam_trasferta_pt is None:
+        lam_trasferta_pt = lam_trasferta_reale * 0.45
+
+    # --- 1. SIMULAZIONE GOL FINALE (Poisson ricalibrata sui reali) ---
+    gol_casa = np.random.poisson(lam_casa_reale, num_simulazioni)
+    gol_trasferta = np.random.poisson(lam_trasferta_reale, num_simulazioni)
     gol_totali = gol_casa + gol_trasferta
 
     # Esito 1X2 Finale
@@ -41,7 +72,9 @@ def simula_partita_completa(
     risultato_piu_frequente = {
         "Risultato": risultato_top,
         "Probabilità": round((freq_top / num_simulazioni) * 100, 2),
-        "Conteggio": freq_top
+        "Conteggio": freq_top,
+        "Lambda_effettivo_casa": round(lam_casa_reale, 2),
+        "Lambda_effettivo_ospite": round(lam_trasferta_reale, 2)
     }
 
     # --- 2. GOL / NO GOL FINALE ---
@@ -107,7 +140,7 @@ def simula_partita_completa(
         "Ospite": calcola_multigol(gol_trasferta)
     }
 
-    # --- 6. CALCI D'ANGOLO (variabili per squadra e totali) ---
+    # --- 6. CALCI D'ANGOLO ---
     angoli_c = np.random.poisson(media_angoli_casa, num_simulazioni)
     angoli_t = np.random.poisson(media_angoli_trasferta, num_simulazioni)
     angoli_tot = angoli_c + angoli_t
@@ -121,7 +154,7 @@ def simula_partita_completa(
         "Over 10.5 Angoli Totali": round((int(np.sum(angoli_tot > 10.5)) / num_simulazioni) * 100, 2),
     }
 
-    # --- 7. CARTELLINI (variabili per squadra e totali) ---
+    # --- 7. CARTELLINI ---
     cart_c = np.random.poisson(media_cartellini_casa, num_simulazioni)
     cart_t = np.random.poisson(media_cartellini_trasferta, num_simulazioni)
     cart_tot = cart_c + cart_t
