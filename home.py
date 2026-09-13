@@ -20,7 +20,7 @@ from web_enricher import (
 )
 
 st.set_page_config(
-    page_title="Pro Betting Analytics Hub",
+    page_title="Analisi Calcistica IA",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -110,7 +110,7 @@ def trova_miglior_pronostico(sim_result):
   return candidati[0] if candidati else ("N/D", 0.0)
 
 
-st.title("⚽ Advanced Football Simulation & Analytics Hub")
+st.title("⚽ Analisi Calcistica IA")
 
 competizioni = {
     "🇮🇹 Serie A (Italia)": {"code": "SA", "odds_key": "soccer_italy_serie_a"},
